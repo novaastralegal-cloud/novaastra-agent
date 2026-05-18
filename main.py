@@ -230,3 +230,41 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     print(f"Starting Novaastra Agent v3 on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
+
+
+# ─── CONTENT GENERATION ROUTES ────────────────
+
+@app.route("/api/generate", methods=["POST", "GET"])
+def generate_content():
+    """Generic content generation endpoint for the dashboard."""
+    from flask import request
+    
+    if request.method == "GET":
+        return jsonify({"status": "ok", "endpoint": "generate"})
+
+    data = request.get_json() or {}
+    prompt = data.get("prompt", "")
+    max_tokens = data.get("max_tokens", 800)
+
+    if not prompt:
+        return jsonify({"success": False, "error": "No prompt provided"}), 400
+
+    if not ANTHROPIC_API_KEY:
+        return jsonify({"success": False, "error": "API key not configured"}), 500
+
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        text = response.content[0].text.strip()
+        return jsonify({
+            "success": True,
+            "text": text,
+            "generated_at": datetime.now().isoformat(),
+        })
+    except Exception as e:
+        print(f"Generate error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
