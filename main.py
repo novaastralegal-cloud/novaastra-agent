@@ -1,287 +1,213 @@
 """
 Novaastra Legal — Growth Agent Backend
-Fetches real data from Google News RSS, IP India (public), and MCA CDM
-Runs daily and serves data to the frontend dashboard
+Fixed version — robust error handling, simplified dependencies
 """
 
 from flask import Flask, jsonify
 from flask_cors import CORS
 import feedparser
-import requests
-from bs4 import BeautifulSoup
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 import anthropic
 import re
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=False)
+
+# CORS — allow all origins
+CORS(app)
 
 @app.after_request
-def add_cors_headers(response):
+def add_cors(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
     return response
 
 @app.route('/api/<path:path>', methods=['OPTIONS'])
-def handle_options(path):
+def options_handler(path):
     return '', 204
 
+# ─── CONFIG ───────────────────────────────────
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-# ─────────────────────────────────────────────
-# DATA SOURCES
-# ─────────────────────────────────────────────
-
-# Google News RSS URLs — free, no API key needed
 GOOGLE_NEWS_FEEDS = {
     "startup_funding": "https://news.google.com/rss/search?q=India+startup+funding+raised&hl=en-IN&gl=IN&ceid=IN:en",
-    "trademark_dispute": "https://news.google.com/rss/search?q=India+trademark+dispute+brand&hl=en-IN&gl=IN&ceid=IN:en",
-    "product_launch": "https://news.google.com/rss/search?q=India+brand+launch+new+product+2025&hl=en-IN&gl=IN&ceid=IN:en",
-    "startup_india": "https://news.google.com/rss/search?q=startup+India+brand+new+company+2025&hl=en-IN&gl=IN&ceid=IN:en",
+    "trademark_dispute": "https://news.google.com/rss/search?q=India+trademark+brand+dispute&hl=en-IN&gl=IN&ceid=IN:en",
+    "product_launch": "https://news.google.com/rss/search?q=India+new+brand+product+launch&hl=en-IN&gl=IN&ceid=IN:en",
 }
 
-# StartupTalky RSS — daily India funding news (free)
 STARTUPTALKY_RSS = "https://startuptalky.com/rss"
 
-# MCA CDM portal — public company stats (no auth needed)
-MCA_CDM_URL = "https://www.mcacdm.nic.in/"
+# ─── FETCH FUNCTIONS ──────────────────────────
 
-# IP India public search
-IP_INDIA_SEARCH = "https://ipindiaonline.gov.in/tmrpublicsearch/frmmain.aspx"
-
-
-# ─────────────────────────────────────────────
-# FETCH FUNCTIONS
-# ─────────────────────────────────────────────
-
-def fetch_google_news(feed_key: str, max_items: int = 8) -> list:
-    """Fetch and parse a Google News RSS feed."""
-    url = GOOGLE_NEWS_FEEDS.get(feed_key, "")
-    if not url:
-        return []
+def fetch_feed(url, max_items=8):
+    """Safely fetch any RSS feed."""
     try:
         feed = feedparser.parse(url)
         items = []
         for entry in feed.entries[:max_items]:
             items.append({
                 "title": entry.get("title", ""),
-                "link": entry.get("link", ""),
+                "summary": entry.get("summary", "")[:250],
+                "source": entry.get("source", {}).get("title", "News"),
                 "published": entry.get("published", ""),
-                "summary": entry.get("summary", "")[:300],
-                "source": entry.get("source", {}).get("title", "Google News"),
             })
         return items
     except Exception as e:
-        print(f"Error fetching {feed_key}: {e}")
+        print(f"Feed fetch error: {e}")
         return []
 
 
-def fetch_startuptalky() -> list:
-    """Fetch latest India startup funding news from StartupTalky RSS."""
-    try:
-        feed = feedparser.parse(STARTUPTALKY_RSS)
-        items = []
-        for entry in feed.entries[:10]:
-            title = entry.get("title", "")
-            # Only include funding-related articles
-            if any(word in title.lower() for word in ["raises", "funding", "crore", "million", "seed", "series"]):
-                items.append({
-                    "title": title,
-                    "link": entry.get("link", ""),
-                    "published": entry.get("published", ""),
-                    "summary": entry.get("summary", "")[:300],
-                    "source": "StartupTalky",
-                })
-        return items
-    except Exception as e:
-        print(f"Error fetching StartupTalky: {e}")
-        return []
-
-
-def analyse_articles_with_ai(articles: list, trigger_type: str) -> list:
-    """
-    Use Claude to extract company names, IP risk signals, and opportunity 
-    summaries from raw news articles.
-    """
+def analyse_with_ai(articles, trigger_type):
+    """Use Claude to extract IP opportunities from articles."""
     if not articles or not ANTHROPIC_API_KEY:
         return []
 
     articles_text = "\n\n".join([
-        f"Title: {a['title']}\nSummary: {a['summary']}\nSource: {a['source']}\nDate: {a['published']}"
-        for a in articles[:6]
+        f"Title: {a['title']}\nSummary: {a['summary']}"
+        for a in articles[:5]
     ])
 
-    prompt = f"""You are an IP intelligence analyst for Novaastra Legal, a trademark and IP law firm in India.
+    prompt = f"""You are an IP analyst for a trademark law firm in India.
 
-Analyse these news articles and extract companies that likely need trademark or IP legal help.
-
-Trigger type being searched: {trigger_type}
+Read these news articles and find companies that likely need trademark or IP legal help.
+Trigger: {trigger_type}
 
 Articles:
 {articles_text}
 
-For each relevant company found, extract:
-1. Company name (as specific as possible)
-2. Why they need IP help (1 sentence, specific to their situation)
-3. Sector/industry
-4. Trigger type: one of "Funding Raised", "Product Launch", "Brand Dispute", "New Registration"
-5. Urgency: "High", "Medium", or "Low"
+Return ONLY a JSON array. Each item must have these exact keys:
+- company (string: company name)
+- reason (string: one sentence why they need IP help)
+- sector (string: industry)
+- trigger (string: one of "Funding Raised", "Product Launch", "Brand Dispute", "New Registration")
+- urgency (string: "High", "Medium", or "Low")
 
-Return ONLY a JSON array. Each object must have: company, reason, sector, trigger, urgency.
-If no clearly relevant companies are found, return an empty array [].
-No markdown, no explanation. Raw JSON only."""
+Return [] if nothing relevant found. No markdown, no explanation. Raw JSON array only."""
 
     try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=800,
+            max_tokens=600,
             messages=[{"role": "user", "content": prompt}]
         )
         text = response.content[0].text.strip()
         text = re.sub(r'```json|```', '', text).strip()
-        return json.loads(text)
+        result = json.loads(text)
+        return result if isinstance(result, list) else []
     except Exception as e:
-        print(f"Error analysing articles: {e}")
+        print(f"AI analysis error: {e}")
         return []
 
 
-def check_ip_india_trademark(company_name: str) -> bool:
-    """
-    Basic check — returns True if NO trademark found for the company name.
-    Uses IP India public search (no auth required).
-    Note: This is a simplified check. For production, implement full form submission.
-    """
-    try:
-        # Simplified — in production this would do a proper POST to IP India search
-        # For now returns True (no trademark) as a placeholder
-        # Real implementation needs Selenium or requests with session handling
-        return True
-    except:
-        return True
+# ─── ROUTES ───────────────────────────────────
+
+@app.route("/", methods=["GET"])
+def index():
+    return jsonify({
+        "name": "Novaastra Legal Growth Agent API",
+        "status": "running",
+        "version": "2.0",
+        "endpoints": ["/api/health", "/api/opportunities", "/api/news-summary"]
+    })
 
 
-# ─────────────────────────────────────────────
-# API ROUTES
-# ─────────────────────────────────────────────
+@app.route("/api/health", methods=["GET"])
+def health():
+    return jsonify({
+        "status": "ok",
+        "timestamp": datetime.now().isoformat(),
+        "anthropic_configured": bool(ANTHROPIC_API_KEY),
+        "version": "2.0"
+    })
+
 
 @app.route("/api/opportunities", methods=["GET"])
 def get_opportunities():
-    """
-    Main endpoint — fetches real news, analyses with AI, 
-    returns opportunity cards for the radar.
-    """
-    all_opportunities = []
+    """Fetch real news and extract IP opportunities."""
+    all_opps = []
 
-    # 1. Startup funding news (most important signal)
-    print("Fetching startup funding news...")
-    funding_articles = fetch_startuptalky() + fetch_google_news("startup_funding")
-    if funding_articles:
-        funding_opps = analyse_articles_with_ai(funding_articles, "Funding Raised — startups that just raised money and urgently need trademark protection")
-        all_opportunities.extend(funding_opps)
+    # Funding news
+    funding = fetch_feed(STARTUPTALKY_RSS) + fetch_feed(GOOGLE_NEWS_FEEDS["startup_funding"])
+    if funding:
+        opps = analyse_with_ai(
+            funding,
+            "Startups that just raised funding and urgently need trademark protection"
+        )
+        all_opps.extend(opps)
 
-    # 2. Brand / trademark disputes
-    print("Fetching trademark dispute news...")
-    dispute_articles = fetch_google_news("trademark_dispute")
-    if dispute_articles:
-        dispute_opps = analyse_articles_with_ai(dispute_articles, "Brand Dispute — companies involved in trademark disputes or brand conflicts")
-        all_opportunities.extend(dispute_opps)
+    # Disputes
+    disputes = fetch_feed(GOOGLE_NEWS_FEEDS["trademark_dispute"])
+    if disputes:
+        opps = analyse_with_ai(
+            disputes,
+            "Companies in brand or trademark disputes needing legal help"
+        )
+        all_opps.extend(opps)
 
-    # 3. New product launches
-    print("Fetching product launch news...")
-    launch_articles = fetch_google_news("product_launch")
-    if launch_articles:
-        launch_opps = analyse_articles_with_ai(launch_articles, "Product Launch — brands launching new products that need trademark filing")
-        all_opportunities.extend(launch_opps)
+    # Launches
+    launches = fetch_feed(GOOGLE_NEWS_FEEDS["product_launch"])
+    if launches:
+        opps = analyse_with_ai(
+            launches,
+            "Brands launching new products that need trademark filing"
+        )
+        all_opps.extend(opps)
 
-    # Deduplicate by company name
+    # Deduplicate
     seen = set()
-    unique_opps = []
-    for opp in all_opportunities:
+    unique = []
+    for opp in all_opps:
         name = opp.get("company", "").lower().strip()
-        if name and name not in seen:
+        if name and name not in seen and len(name) > 2:
             seen.add(name)
-            unique_opps.append(opp)
+            unique.append(opp)
 
     return jsonify({
         "success": True,
-        "count": len(unique_opps),
-        "opportunities": unique_opps,
+        "count": len(unique),
+        "opportunities": unique,
         "fetched_at": datetime.now().isoformat(),
     })
 
 
 @app.route("/api/news-summary", methods=["GET"])
-def get_news_summary():
-    """
-    Returns a daily IP law news digest — 
-    latest trademark/IP developments in India.
-    """
-    articles = (
-        fetch_google_news("trademark_dispute")[:4] +
-        fetch_google_news("startup_funding")[:4]
-    )
+def news_summary():
+    """Daily IP news digest."""
+    articles = fetch_feed(GOOGLE_NEWS_FEEDS["trademark_dispute"], 4)
 
     if not articles or not ANTHROPIC_API_KEY:
-        return jsonify({"success": False, "message": "No articles found"})
+        return jsonify({"success": False, "summary": "No data available."})
 
-    articles_text = "\n\n".join([
-        f"Title: {a['title']}\nSource: {a['source']}"
-        for a in articles
-    ])
+    articles_text = "\n".join([f"- {a['title']}" for a in articles])
 
-    prompt = f"""You are a legal news summariser for Novaastra Legal (IP & trademark law firm, India).
+    prompt = f"""Summarise today's India IP and trademark news in 3 bullet points for a trademark lawyer.
+Each bullet: 1-2 sentences. Focus on what's relevant for brand owners.
 
-Summarise today's most relevant IP and trademark news from India in 3 bullet points.
-Each bullet should be 1-2 sentences. Focus on things relevant to trademark lawyers and their clients.
-
-Articles:
+Headlines:
 {articles_text}
 
-Return only the 3 bullet points. Start each with •"""
+Return only 3 bullet points starting with -"""
 
     try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=300,
+            max_tokens=250,
             messages=[{"role": "user", "content": prompt}]
         )
-        summary = response.content[0].text.strip()
         return jsonify({
             "success": True,
-            "summary": summary,
+            "summary": response.content[0].text.strip(),
             "fetched_at": datetime.now().isoformat(),
         })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
 
-@app.route("/api/health", methods=["GET"])
-def health():
-    """Simple health check endpoint."""
-    return jsonify({
-        "status": "ok",
-        "timestamp": datetime.now().isoformat(),
-        "anthropic_configured": bool(ANTHROPIC_API_KEY),
-    })
-
-
-@app.route("/", methods=["GET"])
-def index():
-    return jsonify({
-        "name": "Novaastra Legal Growth Agent API",
-        "version": "1.0",
-        "endpoints": [
-            "/api/opportunities  — Real-time opportunity radar",
-            "/api/news-summary   — Daily IP news digest",
-            "/api/health         — Health check",
-        ]
-    })
-
-
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
+    print(f"Starting Novaastra Agent on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
