@@ -83,7 +83,7 @@ Include at least 3-5 companies if possible. Raw JSON array only. No markdown."""
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-3-5-sonnet-20241022",
             max_tokens=1000,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -136,7 +136,7 @@ def generate_content():
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-3-5-sonnet-20241022",
             max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -220,7 +220,7 @@ Headlines:\n{headlines}\nReturn 3 bullet points starting with -"""
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-3-5-sonnet-20241022",
             max_tokens=250,
             messages=[{"role": "user", "content": prompt}]
         )
