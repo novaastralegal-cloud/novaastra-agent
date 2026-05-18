@@ -1,9 +1,9 @@
 """
-Novaastra Legal — Growth Agent Backend v3
-More generous AI extraction + fallback sample data if feeds return nothing
+Novaastra Legal — Growth Agent Backend v4
+Fixed 405 error on /api/generate
 """
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 import feedparser
 import json
@@ -13,18 +13,14 @@ import anthropic
 import re
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins="*", methods=["GET", "POST", "OPTIONS"], allow_headers=["Content-Type"])
 
 @app.after_request
 def add_cors(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
     return response
-
-@app.route('/api/<path:path>', methods=['OPTIONS'])
-def options_handler(path):
-    return '', 204
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
@@ -34,7 +30,6 @@ FEEDS = {
     "startup":  "https://news.google.com/rss/search?q=India+new+startup+company+launch+2026&hl=en-IN&gl=IN&ceid=IN:en",
     "msme":     "https://news.google.com/rss/search?q=India+MSME+small+business+brand+2026&hl=en-IN&gl=IN&ceid=IN:en",
 }
-
 STARTUPTALKY = "https://startuptalky.com/rss"
 
 
@@ -44,27 +39,25 @@ def fetch_feed(url, max_items=10):
         items = []
         for entry in feed.entries[:max_items]:
             title = entry.get("title", "").strip()
-            summary = entry.get("summary", "").strip()[:300]
             if title:
                 items.append({
                     "title": title,
-                    "summary": summary,
+                    "summary": entry.get("summary", "").strip()[:300],
                     "source": entry.get("source", {}).get("title", "News"),
                 })
         return items
     except Exception as e:
-        print(f"Feed error {url}: {e}")
+        print(f"Feed error: {e}")
         return []
 
 
 def extract_opportunities(articles):
-    """Use Claude to extract companies needing IP help - generous extraction."""
     if not articles or not ANTHROPIC_API_KEY:
         return []
 
     text = "\n".join([f"- {a['title']}" for a in articles[:12]])
 
-    prompt = f"""You are an IP intelligence analyst for a trademark law firm in India (Novaastra Legal).
+    prompt = f"""You are an IP analyst for a trademark law firm in India (Novaastra Legal).
 
 Below are today's Indian business news headlines. Extract ANY company or brand that could benefit from trademark or IP legal services.
 
@@ -74,21 +67,18 @@ Be GENEROUS — include companies that:
 - Are expanding to new markets
 - Are new startups or D2C brands
 - Had any brand/name related news
-- Are in consumer goods, fashion, food, tech, pharma, or any product sector
 
 Headlines:
 {text}
 
-For each relevant company, return a JSON object with:
-- company: company or brand name (string)
-- reason: specific one-sentence reason they need IP/trademark help (string)
-- sector: industry sector (string)
-- trigger: one of "Funding Raised", "Product Launch", "Brand Dispute", "New Registration", "Market Expansion" (string)
-- urgency: "High", "Medium", or "Low" (string)
+Return a JSON array. Each item must have:
+- company (string)
+- reason (string: one sentence why they need IP help)
+- sector (string)
+- trigger (string: one of "Funding Raised", "Product Launch", "Brand Dispute", "New Registration", "Market Expansion")
+- urgency (string: "High", "Medium", or "Low")
 
-Return a JSON array. Include at least 3-5 companies if possible. Be inclusive rather than exclusive.
-If truly no companies found, return [].
-Raw JSON array only. No markdown, no explanation."""
+Include at least 3-5 companies if possible. Raw JSON array only. No markdown."""
 
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -97,8 +87,7 @@ Raw JSON array only. No markdown, no explanation."""
             max_tokens=1000,
             messages=[{"role": "user", "content": prompt}]
         )
-        text_out = response.content[0].text.strip()
-        text_out = re.sub(r'```json|```', '', text_out).strip()
+        text_out = re.sub(r'```json|```', '', response.content[0].text.strip()).strip()
         result = json.loads(text_out)
         return result if isinstance(result, list) else []
     except Exception as e:
@@ -106,145 +95,37 @@ Raw JSON array only. No markdown, no explanation."""
         return []
 
 
-def get_sample_opportunities():
-    """Fallback sample data when feeds return nothing useful."""
-    return [
-        {
-            "company": "Sample — Real data unavailable today",
-            "reason": "RSS feeds returned no relevant articles today. Try again tomorrow morning when fresh news is available.",
-            "sector": "System Message",
-            "trigger": "New Registration",
-            "urgency": "Low"
-        }
-    ]
-
+# ─── ROUTES ───────────────────────────────────
 
 @app.route("/", methods=["GET"])
 def index():
-    return jsonify({
-        "name": "Novaastra Legal Growth Agent API",
-        "status": "running",
-        "version": "3.0"
-    })
+    return jsonify({"name": "Novaastra Legal Growth Agent API", "status": "running", "version": "4.0"})
 
 
-@app.route("/api/health", methods=["GET"])
+@app.route("/api/health", methods=["GET", "OPTIONS"])
 def health():
+    if request.method == "OPTIONS":
+        return '', 204
     return jsonify({
         "status": "ok",
         "timestamp": datetime.now().isoformat(),
         "anthropic_configured": bool(ANTHROPIC_API_KEY),
-        "version": "3.0"
+        "version": "4.0"
     })
 
 
-@app.route("/api/opportunities", methods=["GET"])
-def get_opportunities():
-    all_articles = []
-
-    # Collect from all feeds
-    for key, url in FEEDS.items():
-        articles = fetch_feed(url, 8)
-        all_articles.extend(articles)
-        print(f"Feed {key}: {len(articles)} articles")
-
-    # Also try StartupTalky
-    st_articles = fetch_feed(STARTUPTALKY, 10)
-    all_articles.extend(st_articles)
-    print(f"StartupTalky: {len(st_articles)} articles")
-
-    print(f"Total articles collected: {len(all_articles)}")
-
-    # Deduplicate articles by title
-    seen_titles = set()
-    unique_articles = []
-    for a in all_articles:
-        t = a['title'].lower()[:60]
-        if t not in seen_titles:
-            seen_titles.add(t)
-            unique_articles.append(a)
-
-    print(f"Unique articles: {len(unique_articles)}")
-
-    # Extract opportunities
-    opps = []
-    if unique_articles:
-        opps = extract_opportunities(unique_articles)
-        print(f"Opportunities extracted: {len(opps)}")
-
-    # Deduplicate by company name
-    seen_companies = set()
-    unique_opps = []
-    for opp in opps:
-        name = opp.get("company", "").lower().strip()
-        if name and name not in seen_companies and len(name) > 2:
-            seen_companies.add(name)
-            unique_opps.append(opp)
-
-    # If nothing found use sample
-    if not unique_opps:
-        print("No opportunities found — returning sample data")
-        unique_opps = get_sample_opportunities()
-
-    return jsonify({
-        "success": True,
-        "count": len(unique_opps),
-        "opportunities": unique_opps,
-        "articles_scanned": len(unique_articles),
-        "fetched_at": datetime.now().isoformat(),
-    })
-
-
-@app.route("/api/news-summary", methods=["GET"])
-def news_summary():
-    articles = fetch_feed(FEEDS["brand"], 5)
-    if not articles or not ANTHROPIC_API_KEY:
-        return jsonify({"success": False, "summary": "No data today."})
-
-    headlines = "\n".join([f"- {a['title']}" for a in articles])
-    prompt = f"""Summarise these India business/brand news headlines in 3 bullet points for a trademark lawyer.
-Focus on IP-relevant insights.
-
-Headlines:
-{headlines}
-
-Return 3 bullet points starting with -"""
-
-    try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=250,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return jsonify({
-            "success": True,
-            "summary": response.content[0].text.strip(),
-            "fetched_at": datetime.now().isoformat(),
-        })
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    print(f"Starting Novaastra Agent v3 on port {port}")
-    app.run(host="0.0.0.0", port=port, debug=False)
-
-
-# ─── CONTENT GENERATION ROUTES ────────────────
-
-@app.route("/api/generate", methods=["POST", "GET"])
+@app.route("/api/generate", methods=["GET", "POST", "OPTIONS"])
 def generate_content():
-    """Generic content generation endpoint for the dashboard."""
-    from flask import request
-    
-    if request.method == "GET":
-        return jsonify({"status": "ok", "endpoint": "generate"})
+    """AI content generation — used by all dashboard tabs."""
+    if request.method == "OPTIONS":
+        return '', 204
 
-    data = request.get_json() or {}
+    if request.method == "GET":
+        return jsonify({"status": "ok", "endpoint": "generate", "method": "POST required"})
+
+    data = request.get_json(silent=True) or {}
     prompt = data.get("prompt", "")
-    max_tokens = data.get("max_tokens", 800)
+    max_tokens = int(data.get("max_tokens", 800))
 
     if not prompt:
         return jsonify({"success": False, "error": "No prompt provided"}), 400
@@ -268,3 +149,91 @@ def generate_content():
     except Exception as e:
         print(f"Generate error: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/opportunities", methods=["GET", "OPTIONS"])
+def get_opportunities():
+    if request.method == "OPTIONS":
+        return '', 204
+
+    all_articles = []
+    for key, url in FEEDS.items():
+        articles = fetch_feed(url, 8)
+        all_articles.extend(articles)
+        print(f"Feed {key}: {len(articles)} articles")
+
+    st_articles = fetch_feed(STARTUPTALKY, 10)
+    all_articles.extend(st_articles)
+    print(f"Total articles: {len(all_articles)}")
+
+    # Deduplicate
+    seen_titles = set()
+    unique_articles = []
+    for a in all_articles:
+        t = a['title'].lower()[:60]
+        if t not in seen_titles:
+            seen_titles.add(t)
+            unique_articles.append(a)
+
+    opps = extract_opportunities(unique_articles) if unique_articles else []
+
+    # Deduplicate companies
+    seen_companies = set()
+    unique_opps = []
+    for opp in opps:
+        name = opp.get("company", "").lower().strip()
+        if name and name not in seen_companies and len(name) > 2:
+            seen_companies.add(name)
+            unique_opps.append(opp)
+
+    if not unique_opps:
+        unique_opps = [{
+            "company": "No results today",
+            "reason": "RSS feeds returned no relevant articles today. Try again tomorrow morning.",
+            "sector": "System",
+            "trigger": "New Registration",
+            "urgency": "Low"
+        }]
+
+    return jsonify({
+        "success": True,
+        "count": len(unique_opps),
+        "opportunities": unique_opps,
+        "articles_scanned": len(unique_articles),
+        "fetched_at": datetime.now().isoformat(),
+    })
+
+
+@app.route("/api/news-summary", methods=["GET", "OPTIONS"])
+def news_summary():
+    if request.method == "OPTIONS":
+        return '', 204
+
+    articles = fetch_feed(FEEDS["brand"], 5)
+    if not articles or not ANTHROPIC_API_KEY:
+        return jsonify({"success": False, "summary": "No data today."})
+
+    headlines = "\n".join([f"- {a['title']}" for a in articles])
+    prompt = f"""Summarise these India business/brand news headlines in 3 bullet points for a trademark lawyer.
+Headlines:\n{headlines}\nReturn 3 bullet points starting with -"""
+
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=250,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return jsonify({
+            "success": True,
+            "summary": response.content[0].text.strip(),
+            "fetched_at": datetime.now().isoformat(),
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    print(f"Starting Novaastra Agent v4 on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
